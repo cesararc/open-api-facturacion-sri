@@ -11,6 +11,7 @@ import {
   statSync,
   unlinkSync,
   readFileSync,
+  writeFileSync,
 } from 'fs';
 import { join } from 'path';
 import * as forge from 'node-forge';
@@ -110,9 +111,16 @@ export class CertificateService {
     pagination: any;
     total: number;
   } {
+    return this.paginateCertificates(this.listAllCertificates(), options);
+  }
+
+  /**
+   * Todos los .p12 del directorio, del más reciente al más antiguo.
+   */
+  listAllCertificates(): CertificateInfo[] {
     this.ensureCertificateDirectory();
 
-    const allCerts = readdirSync(this.certsDir)
+    return readdirSync(this.certsDir)
       .filter((file) => file.toLowerCase().endsWith('.p12'))
       .map((file) => {
         const stats = statSync(join(this.certsDir, file));
@@ -124,7 +132,16 @@ export class CertificateService {
         };
       })
       .sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
+  }
 
+  /**
+   * Pagina una lista ya filtrada. Separado del listado para que quien llama
+   * pueda filtrar por tenant antes de contar y paginar.
+   */
+  paginateCertificates<T>(
+    allCerts: T[],
+    options: { page?: number; limit?: number } = {},
+  ): { certificates: T[]; pagination: any; total: number } {
     const total = allCerts.length;
 
     // If no pagination, return all
@@ -291,6 +308,36 @@ export class CertificateService {
     password: string,
   ): CertificateValidation {
     const certInfo = this.extractP12CertificateInfo(fileName, password);
+    return this.buildValidation(certInfo, fileName);
+  }
+
+  /**
+   * Valida un .p12 que todavía está en memoria, sin escribirlo a disco.
+   * Lanza si la contraseña no abre el archivo.
+   */
+  validateCertificateBuffer(
+    p12Buffer: Buffer,
+    password: string,
+    label: string,
+  ): CertificateValidation {
+    const certInfo = this.extractCertInfoFromBuffer(p12Buffer, password);
+    return this.buildValidation(certInfo, label);
+  }
+
+  /**
+   * Guarda el .p12 en el directorio de certificados con el nombre indicado.
+   */
+  saveCertificateFile(fileName: string, p12Buffer: Buffer): string {
+    this.ensureCertificateDirectory();
+    const filePath = join(this.certsDir, fileName);
+    writeFileSync(filePath, p12Buffer, { mode: 0o600 });
+    return filePath;
+  }
+
+  private buildValidation(
+    certInfo: ExtractedCertInfo,
+    fileName: string,
+  ): CertificateValidation {
     const now = new Date();
     const expiryDate = certInfo.validity.notAfter;
     const startDate = certInfo.validity.notBefore;

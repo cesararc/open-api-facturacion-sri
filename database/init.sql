@@ -33,6 +33,19 @@ COMMENT ON SCHEMA public IS 'standard public schema';
 
 
 --
+-- Name: extensions; Type: SCHEMA; Schema: -; Owner: -
+--
+-- Las tablas usan extensions.uuid_generate_v4(). El volcado original venía de
+-- un entorno donde este esquema ya existía; en un PostgreSQL limpio hay que
+-- crearlo. Ambas sentencias no hacen nada si ya existen.
+--
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
+
+
+--
 -- Name: user_role; Type: TYPE; Schema: public; Owner: -
 --
 
@@ -711,7 +724,8 @@ CREATE TABLE public.usuarios (
     activo boolean DEFAULT true NOT NULL,
     last_login timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    token_version integer DEFAULT 0 NOT NULL
 );
 
 
@@ -943,6 +957,7 @@ INSERT INTO public.catalogo_tarifas_impuesto VALUES ('6dc5e950-2ad3-4033-afeb-24
 INSERT INTO public.catalogo_tarifas_impuesto VALUES ('5f3733e8-3abe-4742-98d8-d0669c8464b2', 'a228e0d0-55e1-4b9d-8867-c2c82ea585ee', '6', 'No Objeto de Impuesto', 0.00, '2024-01-01', NULL, true, '2026-01-23 20:47:05.534545+00', '2026-01-23 20:47:05.534545+00');
 INSERT INTO public.catalogo_tarifas_impuesto VALUES ('6417d0ea-116a-4e27-8163-7a2e6e4c35a0', 'a228e0d0-55e1-4b9d-8867-c2c82ea585ee', '7', 'Exento de IVA', 0.00, '2024-01-01', NULL, true, '2026-01-23 20:47:05.534545+00', '2026-01-23 20:47:05.534545+00');
 INSERT INTO public.catalogo_tarifas_impuesto VALUES ('71a37ebe-f71d-4167-aaf8-2117619f5fa7', 'a228e0d0-55e1-4b9d-8867-c2c82ea585ee', '8', 'IVA Diferenciado', 0.00, '2024-01-01', NULL, true, '2026-01-23 20:47:05.534545+00', '2026-01-23 20:47:05.534545+00');
+INSERT INTO public.catalogo_tarifas_impuesto VALUES ('6f1ea17a-a527-4ba3-8f14-728ff0e611e4', 'a228e0d0-55e1-4b9d-8867-c2c82ea585ee', '10', 'IVA 13%', 13.00, '2024-01-01', NULL, true, '2026-01-23 20:47:05.534545+00', '2026-01-23 20:47:05.534545+00');
 
 
 --
@@ -1551,6 +1566,13 @@ CREATE INDEX idx_comprobantes_estado_activo ON public.comprobantes USING btree (
 --
 
 CREATE INDEX idx_comprobantes_receptor ON public.comprobantes USING btree (receptor_identificacion);
+
+
+--
+-- Name: idx_comprobantes_referencia_externa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_comprobantes_referencia_externa ON public.comprobantes USING btree (emisor_id, id_referencia_externa) WHERE (id_referencia_externa IS NOT NULL);
 
 
 --

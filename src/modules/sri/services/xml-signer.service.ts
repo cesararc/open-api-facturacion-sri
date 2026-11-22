@@ -13,8 +13,9 @@ import { EncryptionService } from '../../../common/services/encryption.service';
 import { STORAGE_PATHS } from '../../../common/utils/storage-paths';
 
 interface EmisorCertificado {
-  certificado_nombre: string;
-  certificado_password_encrypted: string;
+  certificado_nombre: string | null;
+  certificado_password_encrypted: string | null;
+  certificado_p12: Buffer | null;
 }
 
 /**
@@ -304,16 +305,18 @@ export class XmlSignerService implements OnModuleInit {
 
     // Get certificate info from database
     const emisor = await this.db.queryOne<EmisorCertificado>(
-      `SELECT certificado_nombre, certificado_password_encrypted 
+      `SELECT certificado_nombre, certificado_password_encrypted, certificado_p12
        FROM emisores 
        WHERE ruc = $1 AND estado = 'ACTIVO'`,
       [ruc],
     );
 
+    const tieneP12EnBd = !!emisor?.certificado_p12?.length;
+
     if (
       !emisor ||
-      !emisor.certificado_nombre ||
-      !emisor.certificado_password_encrypted
+      !emisor.certificado_password_encrypted ||
+      (!tieneP12EnBd && !emisor.certificado_nombre)
     ) {
       throw new Error(
         `El emisor con RUC ${ruc} no tiene certificado configurado. Por favor suba un certificado P12.`,
@@ -325,15 +328,24 @@ export class XmlSignerService implements OnModuleInit {
       emisor.certificado_password_encrypted,
     );
 
-    // Load certificate from filesystem
-    const certPath = join(this.getCertsDir(), emisor.certificado_nombre);
-    if (!existsSync(certPath)) {
-      throw new Error(
-        `El archivo de certificado ${emisor.certificado_nombre} no existe en el servidor.`,
+    // La BD es la fuente del .p12: sobrevive a redeploys y a varias instancias.
+    // El archivo en disco queda solo como respaldo para emisores anteriores
+    // que aún no tienen el binario guardado.
+    let p12Buffer: Buffer;
+    if (tieneP12EnBd) {
+      p12Buffer = emisor.certificado_p12 as Buffer;
+    } else {
+      const certPath = join(
+        this.getCertsDir(),
+        emisor.certificado_nombre as string,
       );
+      if (!existsSync(certPath)) {
+        throw new Error(
+          `El archivo de certificado ${emisor.certificado_nombre} no existe en el servidor.`,
+        );
+      }
+      p12Buffer = readFileSync(certPath);
     }
-
-    const p12Buffer = readFileSync(certPath);
 
     // Process P12 certificate
     const p12Der = forge.util.createBuffer(p12Buffer.toString('binary'));

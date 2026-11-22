@@ -8,6 +8,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { existsSync, readFileSync } from 'fs';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -27,10 +28,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         database: this.configService.get<string>('database.name'),
         user: this.configService.get<string>('database.user'),
         password: this.configService.get<string>('database.password'),
-        ssl:
-          this.configService.get('database.ssl') === 'true'
-            ? { rejectUnauthorized: false }
-            : undefined,
+        ssl: this.buildSslOptions(),
         // Pool configurable desde .env
         max: this.configService.get<number>('DB_POOL_MAX', 10),
         idleTimeoutMillis: this.configService.get<number>(
@@ -58,13 +56,75 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       );
       client.release();
     } catch (error) {
-      // No relanzar — dejar que la app arranque pero con errores claros en cada query
+      // Sin base de datos la API no puede facturar ni autenticar: es mejor no
+      // arrancar (y que el orquestador reinicie) que aceptar tráfico y fallar
+      // en cada request.
+      const message = (error as Error).message;
       this.logger.error(
-        '❌ No se pudo conectar a la base de datos al arrancar',
-        error,
+        `❌ No se pudo conectar a la base de datos al arrancar: ${message}`,
       );
+      if (/certificate|self.signed|unable to verify/i.test(message)) {
+        this.logger.error(
+          'El servidor PostgreSQL presentó un certificado que no se pudo verificar. ' +
+            'Defina DB_SSL_CA con la CA del proveedor, o DB_SSL_REJECT_UNAUTHORIZED=false ' +
+            'si acepta conectarse sin verificar el certificado.',
+        );
+      }
+      await this.pool?.end().catch(() => undefined);
       this.pool = undefined;
+      throw error;
     }
+  }
+
+  /**
+   * Opciones TLS de la conexión.
+   *
+   * - DB_SSL=false (por defecto): sin TLS.
+   * - DB_SSL=true: TLS verificando el certificado del servidor.
+   *   - DB_SSL_CA: CA con la que verificar (contenido PEM o ruta a un archivo).
+   *     Necesaria cuando el proveedor usa una CA propia.
+   *   - DB_SSL_REJECT_UNAUTHORIZED=false: cifra pero no verifica quién está
+   *     del otro lado. Solo para entornos donde no se puede obtener la CA.
+   */
+  private buildSslOptions():
+    | { rejectUnauthorized: boolean; ca?: string }
+    | undefined {
+    if (this.configService.get('database.ssl') !== 'true') {
+      return undefined;
+    }
+
+    const rejectUnauthorized =
+      this.configService.get<boolean>('database.sslRejectUnauthorized') !==
+      false;
+    const ca = this.readSslCa(
+      this.configService.get<string>('database.sslCa') || '',
+    );
+
+    if (!rejectUnauthorized) {
+      this.logger.warn(
+        'DB_SSL_REJECT_UNAUTHORIZED=false: la conexión a la base de datos va cifrada pero NO verifica el certificado del servidor',
+      );
+    }
+
+    return ca ? { rejectUnauthorized, ca } : { rejectUnauthorized };
+  }
+
+  private readSslCa(value: string): string | undefined {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    // Contenido PEM directo (en una variable de entorno suele venir con \n literales)
+    if (trimmed.includes('-----BEGIN')) {
+      return trimmed.replace(/\\n/g, '\n');
+    }
+    // Si no, es una ruta
+    if (!existsSync(trimmed)) {
+      throw new Error(
+        `DB_SSL_CA apunta a un archivo que no existe: ${trimmed}`,
+      );
+    }
+    return readFileSync(trimmed, 'utf8');
   }
 
   async onModuleDestroy() {

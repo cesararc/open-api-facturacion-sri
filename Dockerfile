@@ -49,6 +49,10 @@ COPY --from=builder /app/node_modules ./node_modules
 # Copy built application
 COPY --from=builder /app/dist ./dist
 
+# Migraciones de BD y su runner: `node scripts/migrate.js` dentro del contenedor
+COPY --from=builder /app/database/migrations ./database/migrations
+COPY --from=builder /app/scripts/migrate.js ./scripts/migrate.js
+
 # Create directories for volumes
 RUN mkdir -p /data/templates /data/pdfs /data/certs /data/xmls \
     /data/pdfs/con_firma /data/pdfs/others /data/pdfs/documents /data/pdfs/images

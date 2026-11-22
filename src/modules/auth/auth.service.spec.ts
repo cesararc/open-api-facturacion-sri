@@ -295,10 +295,34 @@ describe('AuthService', () => {
 
       expect(bcrypt.compare).toHaveBeenCalledWith(currentPassword, mockUser.password_hash);
       expect(bcrypt.hash).toHaveBeenCalledWith(newPassword, 12);
-      expect(db.query).toHaveBeenCalledWith(
-        expect.stringContaining('UPDATE usuarios SET password_hash'),
-        ['new-hash', userId],
+      const [sql, params] = db.query.mock.calls[0];
+      expect(sql).toContain('UPDATE usuarios');
+      expect(sql).toContain('password_hash = $1');
+      expect(params).toEqual(['new-hash', userId]);
+    });
+
+    it('debe revocar las sesiones anteriores al cambiar la contraseña', async () => {
+      db.queryOne.mockResolvedValueOnce(mockUser);
+      (bcrypt.compare as jest.Mock).mockResolvedValueOnce(true);
+      (bcrypt.hash as jest.Mock).mockResolvedValueOnce('new-hash');
+      db.query.mockResolvedValueOnce(undefined);
+
+      await service.changePassword(userId, currentPassword, newPassword);
+
+      expect(db.query.mock.calls[0][0]).toContain(
+        'token_version = token_version + 1',
       );
+    });
+
+    it('no debe revocar sesiones si la contraseña actual es incorrecta', async () => {
+      db.queryOne.mockResolvedValueOnce(mockUser);
+      (bcrypt.compare as jest.Mock).mockResolvedValueOnce(false);
+
+      await expect(
+        service.changePassword(userId, currentPassword, newPassword),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(db.query).not.toHaveBeenCalled();
     });
 
     it('debe lanzar NotFoundException si el usuario no existe', async () => {
@@ -355,6 +379,164 @@ describe('AuthService', () => {
       await expect(
         service.validatePayload({ ...payload, type: 'refresh' }),
       ).rejects.toThrow('Token de refresco no permitido para acceder a recursos');
+    });
+
+    // ── Revocación por versión de sesión ──
+
+    it('debe consultar token_version del usuario', async () => {
+      db.queryOne.mockResolvedValueOnce({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 0,
+      });
+
+      await service.validatePayload(payload);
+
+      expect(db.queryOne.mock.calls[0][0]).toContain('token_version');
+    });
+
+    it('debe aceptar un token con la versión de sesión vigente', async () => {
+      db.queryOne.mockResolvedValueOnce({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 3,
+      });
+
+      const result = await service.validatePayload({
+        ...payload,
+        tokenVersion: 3,
+      });
+
+      expect(result.tokenVersion).toBe(3);
+    });
+
+    it('debe rechazar un token emitido antes de un logout o cambio de contraseña', async () => {
+      db.queryOne.mockResolvedValue({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 4,
+      });
+
+      await expect(
+        service.validatePayload({ ...payload, tokenVersion: 3 }),
+      ).rejects.toThrow('La sesión fue cerrada');
+    });
+
+    it('debe aceptar tokens anteriores a esta función (sin tokenVersion) mientras la versión sea 0', async () => {
+      db.queryOne.mockResolvedValueOnce({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 0,
+      });
+
+      await expect(service.validatePayload(payload)).resolves.toEqual(payload);
+    });
+
+    it('debe rechazar tokens sin tokenVersion una vez que el usuario cerró sesión', async () => {
+      db.queryOne.mockResolvedValue({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 1,
+      });
+
+      await expect(service.validatePayload(payload)).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+
+    it('debe rechazar también el refresh token revocado', async () => {
+      db.queryOne.mockResolvedValue({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 2,
+      });
+
+      await expect(
+        service.validatePayload(
+          { ...payload, type: 'refresh', tokenVersion: 1 },
+          true,
+        ),
+      ).rejects.toThrow('La sesión fue cerrada');
+    });
+  });
+
+  describe('logout', () => {
+    it('debe subir token_version del usuario', async () => {
+      db.query.mockResolvedValueOnce(undefined);
+
+      await service.logout('user-uuid-1');
+
+      const [sql, params] = db.query.mock.calls[0];
+      expect(sql).toContain('token_version = token_version + 1');
+      expect(sql).toContain('WHERE id = $1');
+      expect(params).toEqual(['user-uuid-1']);
+    });
+  });
+
+  describe('versión de sesión en los tokens emitidos', () => {
+    it('login debe firmar access y refresh con el token_version del usuario', async () => {
+      db.queryOne.mockResolvedValueOnce({ ...mockUser, token_version: 5 });
+      (bcrypt.compare as jest.Mock).mockResolvedValueOnce(true);
+      db.query.mockResolvedValueOnce(undefined);
+      jwtService.sign.mockReturnValue('token');
+      jwtService.decode.mockReturnValueOnce(mockDecodedToken);
+
+      await service.login({ email: mockUser.email, password: 'x' });
+
+      expect(db.queryOne.mock.calls[0][0]).toContain('token_version');
+      expect(jwtService.sign.mock.calls[0][0]).toMatchObject({
+        type: 'access',
+        tokenVersion: 5,
+      });
+      expect(jwtService.sign.mock.calls[1][0]).toMatchObject({
+        type: 'refresh',
+        tokenVersion: 5,
+      });
+    });
+
+    it('refresh debe conservar la versión de sesión del token', async () => {
+      jwtService.verify.mockReturnValue({
+        sub: 'user-uuid-1',
+        email: 'admin@test.com',
+        rol: UserRole.SUPERADMIN,
+        tenantId: null,
+        type: 'refresh',
+        tokenVersion: 2,
+      });
+      db.queryOne.mockResolvedValue({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 2,
+      });
+      jwtService.sign.mockReturnValue('token');
+      jwtService.decode.mockReturnValueOnce(mockDecodedToken);
+
+      await service.refreshToken({ refreshToken: 'r' });
+
+      expect(jwtService.sign.mock.calls[0][0]).toMatchObject({
+        tokenVersion: 2,
+      });
+    });
+
+    it('refresh debe fallar si la sesión fue cerrada después de emitir el refresh token', async () => {
+      jwtService.verify.mockReturnValue({
+        sub: 'user-uuid-1',
+        email: 'admin@test.com',
+        rol: UserRole.SUPERADMIN,
+        tenantId: null,
+        type: 'refresh',
+        tokenVersion: 2,
+      });
+      db.queryOne.mockResolvedValue({
+        id: 'user-uuid-1',
+        activo: true,
+        token_version: 3,
+      });
+
+      await expect(
+        service.refreshToken({ refreshToken: 'r' }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(jwtService.sign).not.toHaveBeenCalled();
     });
   });
 

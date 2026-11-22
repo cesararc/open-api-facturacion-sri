@@ -60,7 +60,20 @@ export enum CodigoPorcentajeIVA {
   IVA_EXENTO = '7',
   IVA_DIFERENCIADO = '8', // IVA Diferenciado (Zonas Francas, etc.)
   IVA_15 = '4', // Vigente desde abril 2024
+  IVA_13 = '10', // Tarifa 13%
 }
+
+/**
+ * Leyendas válidas para <contribuyenteRimpe>. La de Negocio Popular es para
+ * quienes están en esa categoría del régimen RIMPE.
+ */
+export const LEYENDAS_CONTRIBUYENTE_RIMPE = [
+  'CONTRIBUYENTE RÉGIMEN RIMPE',
+  'CONTRIBUYENTE NEGOCIO POPULAR - RÉGIMEN RIMPE',
+] as const;
+
+export type LeyendaContribuyenteRimpe =
+  (typeof LEYENDAS_CONTRIBUYENTE_RIMPE)[number];
 
 /**
  * Formas de pago

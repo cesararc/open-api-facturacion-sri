@@ -99,14 +99,18 @@ describe('EncryptionService', () => {
   // ─── encrypt ───────────────────────────────────────────────────────────
 
   describe('encrypt', () => {
-    it('debe encriptar texto plano y retornar formato iv:encrypted', async () => {
+    it('debe encriptar texto plano y retornar formato v2:iv:tag:encrypted (GCM)', async () => {
       const plainText = 'password-secreto-123';
       const encrypted = await service.encrypt(plainText);
 
-      expect(encrypted).toMatch(/^[0-9a-f]+:[0-9a-f]+$/);
-      const [ivHex, encryptedHex] = encrypted.split(':');
-      expect(ivHex).toHaveLength(32); // 16 bytes IV = 32 hex chars
-      expect(encryptedHex.length).toBeGreaterThan(0);
+      expect(encrypted).toMatch(/^v2:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
+      const [version, ivHex, tagHex, encryptedHex] = encrypted.split(':');
+      expect(version).toBe('v2');
+      expect(ivHex).toHaveLength(24); // 12 bytes IV (GCM) = 24 hex chars
+      expect(tagHex).toHaveLength(32); // 16 bytes de tag = 32 hex chars
+      // GCM no rellena: el cifrado mide lo mismo que el texto
+      expect(encryptedHex).toHaveLength(plainText.length * 2);
+      expect(service.isCurrentFormat(encrypted)).toBe(true);
     });
 
     it('debe generar IVs diferentes en cada encriptación (aleatoriedad)', async () => {
@@ -116,13 +120,14 @@ describe('EncryptionService', () => {
 
       expect(enc1).not.toBe(enc2);
       // El IV debe ser diferente
-      expect(enc1.split(':')[0]).not.toBe(enc2.split(':')[0]);
+      expect(enc1.split(':')[1]).not.toBe(enc2.split(':')[1]);
     });
 
-    it('debe encriptar strings vacíos', async () => {
+    it('debe encriptar y recuperar strings vacíos', async () => {
       const encrypted = await service.encrypt('');
 
-      expect(encrypted).toMatch(/^[0-9a-f]+:[0-9a-f]+$/);
+      expect(encrypted).toMatch(/^v2:[0-9a-f]{24}:[0-9a-f]{32}:$/);
+      expect(await service.decrypt(encrypted)).toBe('');
     });
 
     it('debe encriptar caracteres especiales y unicode', async () => {
@@ -177,6 +182,83 @@ describe('EncryptionService', () => {
       const decrypted = await Promise.all(encrypted.map((e) => service.decrypt(e)));
 
       expect(decrypted).toEqual(texts);
+    });
+  });
+
+  // ─── Compatibilidad con lo ya guardado (AES-256-CBC) ───────────────────
+
+  describe('valores guardados con el formato anterior (CBC)', () => {
+    // Generados con la implementación anterior de este servicio y la misma
+    // ENCRYPTION_KEY / ENCRYPTION_SALT de esta spec. Son el contrato: las
+    // contraseñas de certificados ya guardadas en producción tienen esta forma.
+    const guardados = [
+      {
+        plain: 'MyCertP@ssw0rd!2026',
+        cbc: 'e777854047117b8dda8a4572a894a4e1:9950401de3e4597956fe1a17c3ddfaf581e0c56dbbc506f29cd5ca235a1de464',
+      },
+      {
+        plain: 'contraseñañüé@#$%^&*()',
+        cbc: '39d8b6436c89dc53a3f2501770ea77d6:f0269843ebe60ad369ea50cba8f3775f5d8f1aff72416fadb27c1f091295a041',
+      },
+    ];
+
+    it.each(guardados)('sigue desencriptando "$plain"', async ({ plain, cbc }) => {
+      expect(service.isCurrentFormat(cbc)).toBe(false);
+      expect(await service.decrypt(cbc)).toBe(plain);
+    });
+
+    it('al volver a guardar el valor queda en el formato nuevo', async () => {
+      const plain = await service.decrypt(guardados[0].cbc);
+      const reencriptado = await service.encrypt(plain);
+
+      expect(service.isCurrentFormat(reencriptado)).toBe(true);
+      expect(await service.decrypt(reencriptado)).toBe(guardados[0].plain);
+    });
+  });
+
+  // ─── Integridad (GCM) ──────────────────────────────────────────────────
+
+  describe('integridad del formato v2', () => {
+    const flipLastHexChar = (hex: string) =>
+      hex.slice(0, -1) + (hex.endsWith('0') ? '1' : '0');
+
+    it('rechaza un valor cuyo contenido fue alterado', async () => {
+      const [v, iv, tag, data] = (await service.encrypt('clave-del-p12')).split(':');
+      const alterado = [v, iv, tag, flipLastHexChar(data)].join(':');
+
+      await expect(service.decrypt(alterado)).rejects.toThrow();
+    });
+
+    it('rechaza un valor cuyo tag fue alterado', async () => {
+      const [v, iv, tag, data] = (await service.encrypt('clave-del-p12')).split(':');
+      const alterado = [v, iv, flipLastHexChar(tag), data].join(':');
+
+      await expect(service.decrypt(alterado)).rejects.toThrow();
+    });
+
+    it('rechaza un tag recortado', async () => {
+      const [v, iv, tag, data] = (await service.encrypt('clave-del-p12')).split(':');
+      const recortado = [v, iv, tag.slice(0, 8), data].join(':');
+
+      await expect(service.decrypt(recortado)).rejects.toThrow(
+        'Formato de texto encriptado inválido',
+      );
+    });
+
+    it('rechaza un v2 con partes de menos', async () => {
+      await expect(service.decrypt('v2:abcdef')).rejects.toThrow(
+        'Formato de texto encriptado inválido',
+      );
+    });
+
+    it('no desencripta con otra ENCRYPTION_KEY', async () => {
+      const encrypted = await service.encrypt('clave-del-p12');
+      const otra = new EncryptionService({
+        get: (key: string) =>
+          key === 'encryptionKey' ? 'otra-clave-distinta' : validSalt,
+      } as unknown as ConfigService);
+
+      await expect(otra.decrypt(encrypted)).rejects.toThrow();
     });
   });
 

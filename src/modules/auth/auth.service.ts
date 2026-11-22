@@ -36,7 +36,7 @@ export class AuthService {
     this.logger.log(`Intento de login para: ${dto.email}`);
 
     const user = await this.db.queryOne<any>(
-      `SELECT id, email, password_hash, rol, tenant_id, activo
+      `SELECT id, email, password_hash, rol, tenant_id, activo, token_version
        FROM usuarios WHERE email = $1`,
       [dto.email],
     );
@@ -98,6 +98,7 @@ export class AuthService {
       rol: user.rol,
       tenantId: user.tenant_id || user.tenantId,
       type: 'access',
+      tokenVersion: user.token_version ?? user.tokenVersion ?? 0,
     };
 
     const expiresInConfig = this.configService.get<string>('jwt.expiresIn', '8h');
@@ -236,25 +237,55 @@ export class AuthService {
     }
 
     const newHash = await bcrypt.hash(newPassword, this.BCRYPT_ROUNDS);
+    // Subir token_version revoca todos los tokens emitidos con la clave anterior
     await this.db.query(
-      'UPDATE usuarios SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+      `UPDATE usuarios
+       SET password_hash = $1, token_version = token_version + 1, updated_at = NOW()
+       WHERE id = $2`,
       [newHash, userId],
     );
 
-    this.logger.log(`Contraseña cambiada para usuario: ${userId}`);
+    this.logger.log(
+      `Contraseña cambiada para usuario: ${userId}. Sesiones anteriores revocadas`,
+    );
+  }
+
+  /**
+   * Cierra la sesión del usuario revocando todos sus tokens (access y refresh),
+   * en todos los dispositivos. No hay sesiones individuales: un token vale
+   * mientras lleve la versión de sesión vigente del usuario.
+   */
+  async logout(userId: string): Promise<void> {
+    await this.db.query(
+      `UPDATE usuarios
+       SET token_version = token_version + 1, updated_at = NOW()
+       WHERE id = $1`,
+      [userId],
+    );
+
+    this.logger.log(`Sesiones revocadas para usuario: ${userId}`);
   }
 
   /**
    * Valida un payload JWT y retorna el usuario (usado por JwtStrategy)
    */
   async validatePayload(payload: JwtPayload, allowRefreshToken = false): Promise<JwtPayload> {
-    const user = await this.db.queryOne<{ id: string; activo: boolean }>(
-      'SELECT id, activo FROM usuarios WHERE id = $1',
-      [payload.sub],
-    );
+    const user = await this.db.queryOne<{
+      id: string;
+      activo: boolean;
+      token_version: number;
+    }>('SELECT id, activo, token_version FROM usuarios WHERE id = $1', [
+      payload.sub,
+    ]);
 
     if (!user || !user.activo) {
       throw new UnauthorizedException('Token inválido o usuario inactivo');
+    }
+
+    if ((payload.tokenVersion ?? 0) !== (user.token_version ?? 0)) {
+      throw new UnauthorizedException(
+        'La sesión fue cerrada. Inicie sesión nuevamente',
+      );
     }
 
     if (payload.type === 'refresh' && !allowRefreshToken) {

@@ -319,6 +319,60 @@ describe('XmlSignerService', () => {
       ).rejects.toThrow('no tiene certificado configurado');
     });
 
+    it('debe firmar con el .p12 guardado en la BD sin leer el disco', async () => {
+      const forge = require('node-forge');
+      const fs = require('fs');
+      const p12EnBd = Buffer.from('p12-desde-bd');
+      db.queryOne.mockResolvedValue({
+        ...mockEmisor,
+        certificado_p12: p12EnBd,
+      } as any);
+      // El archivo no existe: una instancia nueva o un disco efímero
+      fs.existsSync.mockReturnValue(false);
+
+      const result = await service.loadEmisorCertificate('0924383631001');
+
+      expect(result.privateKey).toBeDefined();
+      expect(db.queryOne).toHaveBeenCalledWith(
+        expect.stringContaining('certificado_p12'),
+        ['0924383631001'],
+      );
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+      expect(forge.util.createBuffer).toHaveBeenCalledWith(
+        p12EnBd.toString('binary'),
+      );
+    });
+
+    it('debe aceptar un emisor con .p12 en BD aunque no tenga certificado_nombre', async () => {
+      const fs = require('fs');
+      db.queryOne.mockResolvedValue({
+        certificado_nombre: null,
+        certificado_password_encrypted: 'encrypted',
+        certificado_p12: Buffer.from('p12-desde-bd'),
+      } as any);
+
+      const result = await service.loadEmisorCertificate('0924383631001');
+
+      expect(result.certificate).toBeDefined();
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+    });
+
+    it('debe usar el archivo en disco cuando la BD no tiene el .p12', async () => {
+      const fs = require('fs');
+      db.queryOne.mockResolvedValue({
+        ...mockEmisor,
+        certificado_p12: null,
+      } as any);
+      fs.existsSync.mockReturnValue(true);
+      fs.readFileSync.mockReturnValue(Buffer.from('fake-p12'));
+
+      await service.loadEmisorCertificate('0924383631001');
+
+      expect(fs.readFileSync).toHaveBeenCalledWith(
+        '/fake/certs/certificado_test.p12',
+      );
+    });
+
     it('debe lanzar error cuando el archivo del certificado no existe en filesystem', async () => {
       db.queryOne.mockResolvedValue(mockEmisor as any);
       const fs = require('fs');

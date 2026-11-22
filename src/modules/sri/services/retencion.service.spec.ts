@@ -155,6 +155,8 @@ describe('RetencionService — Emisión', () => {
             validarRetencionesCatalogo: jest.fn().mockResolvedValue(undefined),
             validarDocumentoSustentoCatalogo: jest.fn().mockResolvedValue(undefined),
             getDefaultAmbiente: jest.fn().mockReturnValue(Ambiente.PRUEBAS),
+            // Sin PROVEEDOR_RUC configurado la info adicional pasa tal cual
+            injectProveedorRucInfoAdicional: jest.fn(async (info: unknown[]) => info),
           },
         },
         {

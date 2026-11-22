@@ -206,9 +206,11 @@ export class EmisoresService {
       return emisor;
     }
 
+    // Estricto: un emisor sin tenant no es de nadie salvo de SUPERADMIN
     if (
       !user.tenantId ||
-      (emisor.tenantId && emisor.tenantId !== user.tenantId)
+      !emisor.tenantId ||
+      emisor.tenantId !== user.tenantId
     ) {
       this.logger.warn(
         `IDOR blocked: user ${user.sub} (tenant ${user.tenantId}) tried to access emisor ${emisorId} (tenant ${emisor.tenantId})`,
@@ -238,9 +240,11 @@ export class EmisoresService {
       return emisor;
     }
 
+    // Estricto: un emisor sin tenant no es de nadie salvo de SUPERADMIN
     if (
       !user.tenantId ||
-      (emisor.tenantId && emisor.tenantId !== user.tenantId)
+      !emisor.tenantId ||
+      emisor.tenantId !== user.tenantId
     ) {
       this.logger.warn(
         `IDOR blocked: user ${user.sub} (tenant ${user.tenantId}) tried to access RUC ${ruc} (tenant ${emisor.tenantId})`,

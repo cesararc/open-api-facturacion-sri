@@ -162,6 +162,15 @@ export class SriRepositoryService {
     return emisor;
   }
 
+  /**
+   * Descarta la fila cacheada del emisor. Debe llamarse cuando cambia su
+   * certificado o sus datos; si no, la emisión sigue viendo la versión
+   * anterior hasta que vence el TTL.
+   */
+  async invalidateEmisorCache(ruc: string): Promise<void> {
+    await this.cacheManager.del(`emisor:ruc:${ruc}`);
+  }
+
   async findPuntoEmision(
     emisorId: string,
     establecimiento: string,
@@ -286,6 +295,27 @@ export class SriRepositoryService {
     return this.db.queryOne<ComprobanteRecord>(
       'SELECT * FROM comprobantes WHERE clave_acceso = $1',
       [claveAcceso],
+    );
+  }
+
+  /**
+   * Comprobantes de un emisor emitidos con la misma referencia externa
+   * (id de la venta en el sistema que llama), del más reciente al más antiguo.
+   * Siempre acotado al emisor (dos negocios pueden usar la misma referencia) y
+   * al ambiente (una factura de pruebas no cuenta como emitida en producción).
+   */
+  async findComprobantesByReferenciaExterna(
+    emisorId: string,
+    tipoComprobante: string,
+    ambiente: string,
+    referenciaExterna: string,
+  ): Promise<ComprobanteRecord[]> {
+    return this.db.queryAll<ComprobanteRecord>(
+      `SELECT * FROM comprobantes
+       WHERE emisor_id = $1 AND tipo_comprobante = $2 AND ambiente = $3
+         AND id_referencia_externa = $4
+       ORDER BY created_at DESC`,
+      [emisorId, tipoComprobante, ambiente, referenciaExterna],
     );
   }
 

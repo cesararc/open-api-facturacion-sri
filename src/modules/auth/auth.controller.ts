@@ -124,6 +124,29 @@ export class AuthController {
       dto.currentPassword,
       dto.newPassword,
     );
-    return { message: 'Contraseña actualizada exitosamente' };
+    return {
+      message:
+        'Contraseña actualizada exitosamente. Inicie sesión nuevamente: las sesiones anteriores fueron cerradas',
+    };
+  }
+
+  /**
+   * POST /auth/logout
+   * Revoca todos los tokens del usuario autenticado
+   */
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Cerrar sesión',
+    description:
+      'Revoca todos los tokens del usuario (access y refresh) en todos sus dispositivos. ' +
+      'No lo use con usuarios de servicio compartidos entre sistemas: los desconecta a todos.',
+  })
+  @ApiResponse({ status: 200, description: 'Sesión cerrada' })
+  @ApiResponse({ status: 401, description: 'Token inválido o expirado' })
+  async logout(@CurrentUser() user: JwtPayload) {
+    await this.authService.logout(user.sub);
+    return { message: 'Sesión cerrada' };
   }
 }

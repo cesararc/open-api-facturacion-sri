@@ -156,6 +156,8 @@ describe('FacturaService — Emisión', () => {
             validarImpuestosDetalles: jest.fn().mockResolvedValue(undefined),
             validarFormasPagoCatalogo: jest.fn().mockResolvedValue(undefined),
             getDefaultAmbiente: jest.fn().mockReturnValue(Ambiente.PRUEBAS),
+            // Sin PROVEEDOR_RUC configurado la info adicional pasa tal cual
+            injectProveedorRucInfoAdicional: jest.fn(async (info: unknown[]) => info),
           },
         },
         {
@@ -433,21 +435,21 @@ describe('FacturaService — Emisión', () => {
   // ==========================================
   // U-FAC-16: generarXmlPreview sin secuencial
   // ==========================================
-  it('U-FAC-16: generarXmlPreview sin secuencial → lanza BadRequestException', () => {
+  it('U-FAC-16: generarXmlPreview sin secuencial → lanza BadRequestException', async () => {
     const dto = createValidDto();
     delete dto.secuencial;
 
-    expect(() => service.generarXmlPreview(dto)).toThrow(BadRequestException);
+    await expect(service.generarXmlPreview(dto)).rejects.toThrow(BadRequestException);
   });
 
   // ==========================================
   // U-FAC-17: generarXmlPreview con secuencial válido
   // ==========================================
-  it('U-FAC-17: generarXmlPreview genera XML correctamente', () => {
+  it('U-FAC-17: generarXmlPreview genera XML correctamente', async () => {
     const dto = createValidDto();
     dto.secuencial = '000000001';
 
-    const xml = service.generarXmlPreview(dto);
+    const xml = await service.generarXmlPreview(dto);
 
     expect(xml).toBeDefined();
     expect(xmlBuilderService.buildFactura).toHaveBeenCalled();

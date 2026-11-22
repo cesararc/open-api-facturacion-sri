@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsIn,
   IsString,
   IsOptional,
   IsNumber,
@@ -12,7 +13,12 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { TipoIdentificacion, FormaPago } from '../constants';
+import {
+  TipoIdentificacion,
+  FormaPago,
+  LEYENDAS_CONTRIBUYENTE_RIMPE,
+} from '../constants';
+import type { LeyendaContribuyenteRimpe } from '../constants';
 
 export class EmisorDto {
   @ApiProperty({ description: 'RUC del emisor (13 dígitos)' })
@@ -70,10 +76,15 @@ export class EmisorDto {
   @IsString()
   agenteRetencion?: string;
 
-  @ApiPropertyOptional({ description: 'Régimen RIMPE' })
+  @ApiPropertyOptional({
+    description: 'Leyenda del régimen RIMPE',
+    enum: LEYENDAS_CONTRIBUYENTE_RIMPE,
+  })
   @IsOptional()
-  @IsEnum(['CONTRIBUYENTE RÉGIMEN RIMPE'])
-  contribuyenteRimpe?: 'CONTRIBUYENTE RÉGIMEN RIMPE';
+  @IsIn(LEYENDAS_CONTRIBUYENTE_RIMPE, {
+    message: `contribuyenteRimpe debe ser uno de: ${LEYENDAS_CONTRIBUYENTE_RIMPE.join(', ')}`,
+  })
+  contribuyenteRimpe?: LeyendaContribuyenteRimpe;
 }
 
 export class CompradorDto {

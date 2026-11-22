@@ -57,6 +57,14 @@ import {
   ComprobanteDetalladoDto,
 } from './dto/query-comprobantes.dto';
 import { RespuestaAnulacionDto } from './dto/anulacion-receptor.dto';
+import { optionalEnv } from '../../common/utils/env.utils';
+
+/**
+ * Facturas por minuto y por IP. Se resuelve en cada request (no al importar el
+ * módulo) para leer el valor ya cargado desde el archivo .env.
+ */
+const emisionFacturaLimit = (): number =>
+  parseInt(optionalEnv('THROTTLE_EMISION_LIMIT', '10'), 10);
 
 @ApiTags('SRI - Facturación Electrónica')
 @ApiBearerAuth('JWT')
@@ -86,7 +94,7 @@ export class SriController {
 
   @Post('emitir/factura')
   @HttpCode(HttpStatus.CREATED)
-  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 facturas/min por IP
+  @Throttle({ default: { limit: emisionFacturaLimit, ttl: 60000 } })
   @ApiOperation({
     summary: 'Emitir factura electrónica',
     description: 'Genera, firma y envía factura al SRI',

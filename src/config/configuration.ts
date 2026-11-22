@@ -98,6 +98,19 @@ export default () => ({
     user: optionalEnv('DB_USER', 'postgres'),
     password: optionalEnv('DB_PASSWORD', ''),
     ssl: optionalEnv('DB_SSL', 'false'),
+    // Con DB_SSL=true se verifica el certificado del servidor salvo que se
+    // desactive explícitamente.
+    sslRejectUnauthorized:
+      optionalEnv('DB_SSL_REJECT_UNAUTHORIZED', 'true') !== 'false',
+    // CA para verificar al servidor: contenido PEM o ruta a un archivo.
+    sslCa: optionalEnv('DB_SSL_CA', ''),
+  },
+
+  // Archivos estáticos
+  staticFiles: {
+    // Publica PDFS_DIR en /pdfs y /images SIN autenticación. Apagado por
+    // defecto: los RIDE se descargan por GET /sri/comprobantes/:clave/ride.
+    servePdfs: optionalEnv('SERVE_STATIC_PDFS', 'false') === 'true',
   },
 
   // Redis Configuration (BullMQ + Cache)
@@ -203,7 +216,10 @@ export interface AppConfig {
     user: string;
     password: string;
     ssl: string;
+    sslRejectUnauthorized: boolean;
+    sslCa: string;
   };
+  staticFiles: { servePdfs: boolean };
   redis: { host: string; port: number; password: string; db: number };
   directories: {
     templates: string;

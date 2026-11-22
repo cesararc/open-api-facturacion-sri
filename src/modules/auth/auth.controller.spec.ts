@@ -40,6 +40,8 @@ describe('AuthController', () => {
             refreshToken: jest.fn(),
             register: jest.fn(),
             changePassword: jest.fn(),
+            getProfile: jest.fn(),
+            logout: jest.fn(),
           },
         },
       ],
@@ -131,30 +133,54 @@ describe('AuthController', () => {
   });
 
   describe('GET /auth/me', () => {
-    it('debe retornar los datos del usuario autenticado', () => {
-      const result = controller.getProfile(mockUser);
-
-      expect(result).toEqual({
+    // El perfil sale de la BD (datos frescos), no del contenido del JWT
+    it('debe retornar el perfil que entrega el servicio para el usuario autenticado', async () => {
+      const perfil = {
         id: mockUser.sub,
         email: mockUser.email,
         rol: mockUser.rol,
         tenantId: mockUser.tenantId,
-      });
+        tenantNombre: null,
+        activo: true,
+      };
+      authService.getProfile.mockResolvedValueOnce(perfil);
+
+      const result = await controller.getProfile(mockUser);
+
+      expect(result).toEqual(perfil);
     });
 
-    it('debe retornar el id desde sub del payload', () => {
+    it('debe consultar el perfil con el sub del payload', async () => {
       const userWithTenant: JwtPayload = {
         ...mockUser,
         sub: 'tenant-user-uuid',
         tenantId: 'tenant-abc',
         rol: UserRole.ADMIN,
       };
+      authService.getProfile.mockResolvedValueOnce({
+        id: 'tenant-user-uuid',
+        email: mockUser.email,
+        rol: UserRole.ADMIN,
+        tenantId: 'tenant-abc',
+        tenantNombre: 'Tenant ABC',
+        activo: true,
+      });
 
-      const result = controller.getProfile(userWithTenant);
+      const result = await controller.getProfile(userWithTenant);
 
-      expect(result.id).toBe('tenant-user-uuid');
+      expect(authService.getProfile).toHaveBeenCalledWith('tenant-user-uuid');
       expect(result.tenantId).toBe('tenant-abc');
-      expect(result.rol).toBe(UserRole.ADMIN);
+    });
+  });
+
+  describe('POST /auth/logout', () => {
+    it('debe revocar las sesiones del usuario autenticado', async () => {
+      authService.logout.mockResolvedValueOnce(undefined);
+
+      const result = await controller.logout(mockUser);
+
+      expect(authService.logout).toHaveBeenCalledWith(mockUser.sub);
+      expect(result).toEqual({ message: 'Sesión cerrada' });
     });
   });
 
@@ -169,7 +195,9 @@ describe('AuthController', () => {
 
       const result = await controller.changePassword(mockUser, changeDto);
 
-      expect(result).toEqual({ message: 'Contraseña actualizada exitosamente' });
+      expect(result.message).toContain('Contraseña actualizada exitosamente');
+      // El cambio revoca las sesiones: la respuesta debe avisarlo
+      expect(result.message).toContain('Inicie sesión nuevamente');
       expect(authService.changePassword).toHaveBeenCalledWith(
         mockUser.sub,
         changeDto.currentPassword,

@@ -6,6 +6,61 @@ Este formato sigue el estándar [Keep a Changelog](https://keepachangelog.com/es
 
 ---
 
+## [1.2.0] — 2026-11-13 · Emisión idempotente, certificados por tenant y endurecimiento
+
+> **Propósito:** dejar la API lista para que otros backends emitan a través de ella sin riesgo de facturas duplicadas, y cerrar los hallazgos de la auditoría de seguridad.
+
+### ⚠️ Al actualizar
+
+1. Ejecuta `npm run db:migrate` (o `node scripts/migrate.js` dentro del contenedor) **antes** de arrancar esta versión: el login lee la columna nueva `usuarios.token_version`.
+2. `DB_SSL=true` ahora verifica el certificado del servidor. Si tu proveedor usa una CA propia, define `DB_SSL_CA`; como último recurso, `DB_SSL_REJECT_UNAUTHORIZED=false`.
+3. La API ya no arranca si no logra conectarse a PostgreSQL.
+4. `/pdfs` deja de publicarse sin autenticación. Si dependes de los `fileUrl` que devuelven los endpoints de PDF, documentos o imágenes, define `SERVE_STATIC_PDFS=true`. El RIDE no se ve afectado.
+5. Los emisores sin tenant asignado solo son accesibles para `SUPERADMIN`. Asígnales tenant si usuarios `ADMIN` o `USER` deben emitir con ellos.
+6. Cambiar la contraseña cierra las sesiones abiertas de ese usuario.
+
+### Añadido
+
+- **Emisión idempotente:** `POST /sri/emitir/factura` acepta `referenciaExterna` (id de la venta en el sistema que llama). Repetir la llamada devuelve el comprobante ya autorizado, o retoma el que quedó pendiente consultando al SRI por la misma clave de acceso, en lugar de emitir otro. Alcance: emisor + tipo de comprobante + ambiente.
+- **`POST /auth/logout`:** invalida todos los tokens del usuario.
+- **Revocación de sesiones:** cada JWT lleva la versión de sesión del usuario (`usuarios.token_version`); cambiar la contraseña o cerrar sesión la incrementa. Los tokens emitidos antes de esta versión siguen sirviendo hasta el primer cambio.
+- **Firma desde la base de datos:** la emisión firma con el `.p12` guardado en `emisores.certificado_p12`. El archivo en `CERTS_DIR` queda como respaldo y ya no es necesario que el volumen sobreviva a un redespliegue para poder emitir.
+- **Leyenda RIMPE Negocio Popular:** `emisor.contribuyenteRimpe` acepta `CONTRIBUYENTE NEGOCIO POPULAR - RÉGIMEN RIMPE` además de `CONTRIBUYENTE RÉGIMEN RIMPE`.
+- **IVA 13%:** código de porcentaje `10` en el catálogo de tarifas y en el RIDE.
+- **`THROTTLE_EMISION_LIMIT`:** límite configurable de facturas por minuto y por IP (antes fijo en 10).
+- **Migraciones numeradas** en `database/migrations` y `npm run db:migrate` para aplicarlas.
+- **CI** en GitHub Actions: tipos, tests y build en cada push y pull request.
+- Variables `DB_SSL_CA`, `DB_SSL_REJECT_UNAUTHORIZED` y `SERVE_STATIC_PDFS`.
+
+### Seguridad
+
+- **Certificados aislados por tenant:** listar, consultar, validar y eliminar certificados solo opera sobre los emisores del tenant del usuario. Antes cualquier usuario autenticado veía y podía borrar los de todos.
+- **Subida de certificado sin efectos previos a la validación:** el `.p12` se valida en memoria (acceso al emisor, clave y vigencia) y solo entonces se guarda, siempre como `<RUC>.p12`. Antes se escribía en disco con el nombre recibido antes de validar, lo que permitía sobrescribir el certificado de otro emisor.
+- **Tenant estricto:** `validateEmisorAccess` y `validateRucAccess` rechazan emisores sin tenant para usuarios que no son `SUPERADMIN`.
+- **Cifrado autenticado:** las claves de certificado nuevas se cifran con AES-256-GCM (formato `v2:`), que detecta manipulación. Los valores existentes en AES-256-CBC se siguen leyendo sin migración.
+- **Eventos en tiempo real (SSE):** el stream valida usuario activo, tipo de token y versión de sesión; antes bastaba un JWT con firma válida, incluido un refresh token.
+- **TLS a PostgreSQL verificado** por defecto cuando `DB_SSL=true` (antes `rejectUnauthorized: false`).
+- **Estáticos opt-in:** `/pdfs` ya no se sirve sin autenticación salvo `SERVE_STATIC_PDFS=true`.
+
+### Corregido
+
+- **CORS bloqueaba llamadas de servidor a servidor en producción:** las peticiones sin cabecera `Origin` (otros backends, healthchecks, `curl`) se rechazaban. CORS sigue restringiendo a los navegadores con `ALLOWED_ORIGINS`.
+- **Subir un certificado respondía 201 aunque no quedara asociado al emisor:** ahora responde error si la asociación falla.
+- **El emisor en caché conservaba el certificado anterior** hasta 5 minutos después de subir uno nuevo; la caché se invalida al subir o eliminar.
+- **`database/init.sql` fallaba en un PostgreSQL limpio** (`schema "extensions" does not exist`): ahora crea el esquema y la extensión `uuid-ossp`.
+- **Arranque silencioso sin base de datos:** el fallo de conexión solo se registraba y la API quedaba arriba respondiendo errores.
+- **Versión inconsistente:** `package.json` (1.0.0), Swagger (2.0.0) y este changelog (1.1.0) decían cosas distintas. La única fuente es `package.json`; Swagger la lee de ahí y un test lo comprueba.
+- **README:** las rutas de emisión documentadas (`/sri/factura/emitir`) no existían; las reales son `/sri/emitir/<tipo>`. El ejemplo enviaba `certificadoP12` y `claveP12`, campos que la API rechaza.
+- **Tests:** 8 suites (131 pruebas) fallaban por mocks desactualizados; todas pasan.
+
+### Notas
+
+- Una emisión rechazada por el SRI consume su secuencial; el reintento usa el siguiente.
+- La protección contra llamadas simultáneas con la misma `referenciaExterna` es por instancia de la API. Con varias instancias, el sistema que llama debe evitar enviar la misma venta en paralelo.
+- `npm run lint:check` reporta deuda previa (formato y reglas `no-unsafe-*`) en gran parte del código; en CI corre como informativo hasta sanearla.
+
+---
+
 ## [1.1.0] — 2026-08-09 · Portal Web Angular + Mejoras de Backend
 
 > **Propósito:** Evolución del proyecto hacia una plataforma completa con portal web SPA para gestión visual de todos los módulos, mejoras de estabilidad y experiencia de usuario.

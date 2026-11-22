@@ -312,7 +312,7 @@ Descripción clara y concisa del problema.
 ## Pasos para Reproducir
 
 1. Configurar variable `X` con valor `Y`
-2. Llamar al endpoint `POST /sri/factura/emitir` con el body:
+2. Llamar al endpoint `POST /sri/emitir/factura` con el body:
    ```json
    { ... }
    ```

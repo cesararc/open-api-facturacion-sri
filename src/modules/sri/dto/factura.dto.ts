@@ -5,6 +5,8 @@ import {
   ValidateNested,
   Matches,
   IsEnum,
+  IsNotEmpty,
+  MaxLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -93,6 +95,21 @@ export class CreateFacturaDto {
   @IsOptional()
   @IsString()
   guiaRemision?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Identificador de la venta en el sistema que llama (idempotencia). ' +
+      'Si ya existe una factura autorizada del mismo emisor con esta referencia, ' +
+      'se devuelve esa en lugar de emitir otra; si quedó pendiente, se resuelve ' +
+      'contra el SRI con la misma clave de acceso.',
+    maxLength: 100,
+    example: 'venta-8f3a2c',
+  })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(100)
+  referenciaExterna?: string;
 }
 
 export class FacturaResponseDto {

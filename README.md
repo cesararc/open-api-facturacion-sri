@@ -19,7 +19,7 @@
 Integra tu sistema (ERP, POS, e-commerce, SaaS) con el **Servicio de Rentas Internas (SRI) de Ecuador** mediante un único endpoint REST. Ella se encarga de todo el flujo complejo por ti:
 
 ```
-Tu sistema  →  POST /sri/factura/emitir  →  Genera XML  →  Firma XAdES-BES
+Tu sistema  →  POST /sri/emitir/factura  →  Genera XML  →  Firma XAdES-BES
             →  Envía al SRI (SOAP)       →  Obtiene autorización
             →  Genera RIDE (PDF+QR)      →  Notifica via Webhook  →  Guarda en DB
 ```
@@ -130,12 +130,17 @@ npm install
 cp .env.example .env.development
 # Edita .env.development con tu configuración (DB, Redis, JWT, etc.)
 
-# 4. Inicializar la base de datos
+# 4. Inicializar la base de datos (solo la primera vez)
 psql -U postgres -d tu_db -f database/init.sql
 
-# 5. Iniciar en modo desarrollo
+# 5. Aplicar migraciones (en cada actualización; es seguro repetirlo)
+npm run db:migrate
+
+# 6. Iniciar en modo desarrollo
 npm run start:dev
 ```
+
+> **Migraciones.** Los cambios de esquema posteriores a `init.sql` viven en `database/migrations/NNN_*.sql`. `npm run db:migrate` aplica las pendientes en orden, cada una en su transacción, y las registra en la tabla `schema_migrations`. `npm run db:migrate -- --dry-run` solo las lista. Dentro del contenedor: `docker compose exec open-api-facturacion-sri node scripts/migrate.js`.
 
 La API estará disponible en: `http://localhost:3001`  
 Documentación Swagger interactiva en: `http://localhost:3001/api`
@@ -171,11 +176,12 @@ curl -X POST http://localhost:3001/auth/login \
 ### 2. Emitir una Factura Electrónica
 
 ```bash
-curl -X POST http://localhost:3001/sri/factura/emitir \
+curl -X POST http://localhost:3001/sri/emitir/factura \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <TU_ACCESS_TOKEN>" \
   -d '{
     "fechaEmision": "05/05/2026",
+    "referenciaExterna": "venta-000123",
     "emisor": {
       "ruc": "0924383631001",
       "razonSocial": "MI EMPRESA S.A.",
@@ -184,9 +190,7 @@ curl -X POST http://localhost:3001/sri/factura/emitir \
       "dirEstablecimiento": "Local 1, Guayaquil",
       "establecimiento": "001",
       "puntoEmision": "001",
-      "obligadoContabilidad": "SI",
-      "certificadoP12": "certificado.p12",
-      "claveP12": "mi-clave-p12"
+      "obligadoContabilidad": "SI"
     },
     "comprador": {
       "tipoIdentificacion": "05",
@@ -228,6 +232,20 @@ curl -X POST http://localhost:3001/sri/factura/emitir \
 }
 ```
 
+El emisor (RUC) debe existir antes en `/emisores`, con su punto de emisión y su certificado `.p12` cargado en `POST /certificates/upload-cert`. El certificado y su clave no viajan en la factura: se guardan una vez, cifrados, y la API firma con ellos.
+
+### Emitir sin duplicar: `referenciaExterna`
+
+Envía en `referenciaExterna` el identificador de la venta en tu sistema (máx. 100 caracteres). Si repites la llamada con la misma referencia para el mismo emisor y ambiente:
+
+| Situación de la emisión anterior | Qué hace la API |
+|---|---|
+| Ya está `AUTORIZADO` | Devuelve ese mismo comprobante. No emite otro. |
+| Quedó pendiente o en proceso | Consulta al SRI por esa clave de acceso (y reenvía el mismo XML si el SRI no lo conoce). No consume otro secuencial. |
+| Fue rechazada por el SRI | Emite un comprobante nuevo. |
+
+Sin `referenciaExterna` cada llamada emite un comprobante nuevo, como siempre.
+
 ---
 
 ## 🏛️ Arquitectura
@@ -259,7 +277,7 @@ curl -X POST http://localhost:3001/sri/factura/emitir \
 ### Flujo de emisión asíncrona
 
 ```
-POST /sri/factura/emitir
+POST /sri/emitir/factura
         │
         ▼
   Validación DTO ──▶ Firma XAdES-BES ──▶ Envío SOAP SRI
@@ -290,24 +308,29 @@ POST /sri/factura/emitir
 | `POST` | `/auth/login` | Iniciar sesión — retorna `accessToken` + `refreshToken` |
 | `POST` | `/auth/refresh` | Renovar tokens con rotación automática |
 | `POST` | `/auth/register` | Crear usuario *(requiere rol SUPERADMIN)* |
-| `PATCH` | `/auth/change-password` | Cambiar contraseña |
+| `GET` | `/auth/me` | Perfil del usuario autenticado |
+| `PATCH` | `/auth/change-password` | Cambiar contraseña *(cierra todas las sesiones del usuario)* |
+| `POST` | `/auth/logout` | Cerrar sesión *(invalida todos los tokens del usuario)* |
 
 ### Comprobantes Electrónicos SRI
 
 | Método | Endpoint | Descripción |
 | ------ | -------- | ----------- |
-| `POST` | `/sri/factura/emitir` | Emitir Factura Electrónica |
-| `POST` | `/sri/nota-credito/emitir` | Emitir Nota de Crédito |
-| `POST` | `/sri/nota-debito/emitir` | Emitir Nota de Débito |
-| `POST` | `/sri/retencion/emitir` | Emitir Comprobante de Retención |
-| `POST` | `/sri/guia-remision/emitir` | Emitir Guía de Remisión |
+| `POST` | `/sri/emitir/factura` | Emitir Factura Electrónica |
+| `POST` | `/sri/emitir/nota-credito` | Emitir Nota de Crédito |
+| `POST` | `/sri/emitir/nota-debito` | Emitir Nota de Débito |
+| `POST` | `/sri/emitir/retencion` | Emitir Comprobante de Retención |
+| `POST` | `/sri/emitir/guia-remision` | Emitir Guía de Remisión |
+| `POST` | `/sri/preview/factura` | Generar el XML sin firmar ni enviar |
 | `GET` | `/sri/comprobantes` | Listar comprobantes *(paginado, filtrable)* |
 | `GET` | `/sri/comprobantes/:claveAcceso` | Detalle de un comprobante |
 | `GET` | `/sri/comprobantes/:claveAcceso/xml` | Descargar XML autorizado |
+| `GET` | `/sri/comprobantes/:claveAcceso/ride` | Descargar RIDE (PDF) |
+| `GET` | `/sri/autorizar/:claveAcceso` | Consultar autorización en el SRI |
 | `GET` | `/sri/verificar/:claveAcceso` | Consultar estado en SRI en tiempo real |
 | `POST` | `/sri/sincronizar` | Sincronizar comprobantes pendientes |
-| `POST` | `/sri/comprobantes/:clave/reintentar` | Reintentar comprobante fallido |
-| `PATCH` | `/sri/comprobantes/:clave/anular` | Anular comprobante localmente |
+| `POST` | `/sri/comprobantes/:claveAcceso/reintentar` | Reintentar comprobante fallido |
+| `PATCH` | `/sri/comprobantes/:claveAcceso/anular` | Anular comprobante localmente |
 
 ### Catálogos SRI
 
@@ -349,11 +372,13 @@ POST /sri/factura/emitir
 
 | Método | Endpoint | Descripción |
 | ------ | -------- | ----------- |
-| `GET` | `/certificates/list-certs` | Listar certificados cargados |
-| `POST` | `/certificates/upload-cert` | Subir certificado P12 |
-| `DELETE` | `/certificates/:fileName` | Eliminar certificado |
-| `POST` | `/certificates/info/:fileName` | Ver datos del certificado |
-| `POST` | `/certificates/validate/:fileName` | Verificar expiración |
+| `GET` | `/certificates/list-certs` | Listar certificados de tu tenant |
+| `POST` | `/certificates/upload-cert` | Subir el `.p12` de un emisor (valida clave y vigencia antes de guardar) |
+| `DELETE` | `/certificates/delete-cert/:fileName` | Eliminar certificado |
+| `GET` | `/certificates/cert-info/:fileName` | Ver datos del certificado |
+| `POST` | `/certificates/validate-cert/:fileName` | Verificar clave y expiración |
+
+El certificado se guarda en la base de datos (cifrada su clave con AES-256-GCM) y la API firma desde ahí; el archivo `<RUC>.p12` en `CERTS_DIR` es solo una copia. Cada tenant ve y administra únicamente los certificados de sus emisores.
 
 ### Templates y Gestión
 
@@ -390,6 +415,11 @@ Copia `.env.example` como punto de partida. Las variables marcadas con ✅ son o
 | `DB_USER` ✅ | Usuario | `postgres` |
 | `DB_PASSWORD` ✅ | Contraseña | `tu-password` |
 | `DB_POOL_MAX` | Conexiones máximas | `10` |
+| `DB_SSL` | Conectar con TLS. Con `true` se **verifica** el certificado del servidor | `false` |
+| `DB_SSL_CA` | CA del servidor: contenido PEM (en una línea con `\n`) o ruta al archivo | *(vacío)* |
+| `DB_SSL_REJECT_UNAUTHORIZED` | `false` cifra sin verificar el certificado. Úsalo solo si no puedes configurar `DB_SSL_CA` | `true` |
+
+La API **no arranca** si no logra conectarse a PostgreSQL.
 
 ### Redis (Cola y Caché)
 
@@ -407,6 +437,12 @@ Copia `.env.example` como punto de partida. Las variables marcadas con ✅ son o
 | `JWT_SECRET` ✅ | Clave JWT (32+ chars) | `super-secret-32chars!!` |
 | `ENCRYPTION_KEY` ✅ | Clave AES-256 (32 chars) | `encryption-key-32chars!!` |
 | `ENCRYPTION_SALT` ✅ | Salt de cifrado | `salt-value` |
+| `ALLOWED_ORIGINS` | Orígenes de navegador permitidos (CORS). Las llamadas de servidor a servidor, sin cabecera `Origin`, no dependen de esta lista: las protege el JWT | `https://app.tudominio.com` |
+| `THROTTLE_LIMIT` | Peticiones por minuto y por IP | `100` |
+| `THROTTLE_EMISION_LIMIT` | Facturas por minuto y por IP en `POST /sri/emitir/factura`. Súbelo si tus clientes son backends que salen por pocas IP | `10` |
+| `SERVE_STATIC_PDFS` | `true` publica `PDFS_DIR` en `/pdfs` **sin autenticación**. El RIDE no lo necesita | `false` |
+
+> No cambies `ENCRYPTION_KEY` ni `ENCRYPTION_SALT` con datos ya guardados: las claves de los certificados dejarían de poder leerse.
 
 ### SRI Ecuador
 
@@ -415,6 +451,7 @@ Copia `.env.example` como punto de partida. Las variables marcadas con ✅ son o
 | `SRI_ENVIRONMENT` ✅ | Ambiente del SRI | `development` / `production` |
 | `SRI_REQUEST_DELAY_MS` | Rate limit hacia SRI | `150` |
 | `SRI_MAX_RETRIES` | Reintentos por comprobante | `3` |
+| `SRI_EMISION_ASYNC` | `false`: `POST /sri/emitir/*` espera al SRI y responde con el resultado. `true`: encola y responde `EN_COLA` | `false` |
 
 ### RIDE / Carbone
 
@@ -478,6 +515,10 @@ Password:  Admin123!
 
 > ⚠️ **Cambia la contraseña inmediatamente** en producción usando `PATCH /auth/change-password`.
 
+### Sesiones
+
+`PATCH /auth/change-password` y `POST /auth/logout` invalidan **todos** los tokens del usuario (access y refresh), en todos los dispositivos. Si varios servicios comparten un mismo usuario, no llames a `logout` desde uno de ellos: cerrarías la sesión de los demás.
+
 ---
 
 ## 📁 Estructura del Proyecto
@@ -512,7 +553,10 @@ open-api-facturacion-sri/
 │       ├── tenants/          # Multi-tenancy
 │       └── webhooks/         # Sistema de notificaciones
 ├── database/
-│   └── init.sql              # Esquema PostgreSQL inicial
+│   ├── init.sql              # Esquema PostgreSQL inicial
+│   └── migrations/           # Cambios de esquema numerados (npm run db:migrate)
+├── scripts/
+│   └── migrate.js            # Aplica las migraciones pendientes
 ├── Collection/
 │   └── Api_Facturacion_Sri.json  # Colección Postman lista para importar
 ├── docs/                     # Documentación técnica por módulo
@@ -534,6 +578,9 @@ open-api-facturacion-sri/
 | `npm run start:prod` | Producción |
 | `npm run build` | Compilar TypeScript |
 | `npm run lint` | ESLint con auto-fix |
+| `npm run lint:check` | ESLint sin modificar archivos (el que usa CI) |
+| `npm run typecheck` | Verificar tipos sin compilar |
+| `npm run db:migrate` | Aplicar migraciones pendientes (`-- --dry-run` para solo listarlas) |
 | `npm run format` | Prettier |
 | `npm run test` | Tests unitarios |
 | `npm run test:cov` | Tests con cobertura |

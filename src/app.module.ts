@@ -61,10 +61,15 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
       inject: [ConfigService],
     }),
 
-    // Serve Static Files
+    // Serve Static Files — solo si SERVE_STATIC_PDFS=true.
+    // Estas rutas no pasan por el guard JWT: cualquiera con la URL descarga el
+    // archivo. Por eso están apagadas salvo que se pidan explícitamente.
     ServeStaticModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => {
+        if (!configService.get<boolean>('staticFiles.servePdfs', false)) {
+          return [];
+        }
         const pdfDir = configService.get<string>('directories.pdfs')!;
         return [
           {

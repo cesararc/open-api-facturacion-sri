@@ -4,6 +4,7 @@ import {
   TipoEmision,
   TipoIdentificacion,
   FormaPago,
+  LeyendaContribuyenteRimpe,
 } from '../constants';
 
 /**
@@ -22,7 +23,7 @@ export interface InfoTributaria {
   secuencial: string;
   dirMatriz: string;
   agenteRetencion?: string;
-  contribuyenteRimpe?: 'CONTRIBUYENTE RÉGIMEN RIMPE';
+  contribuyenteRimpe?: LeyendaContribuyenteRimpe;
 }
 
 /**

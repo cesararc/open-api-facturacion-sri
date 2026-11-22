@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { STORAGE_PATHS } from './common/utils/storage-paths';
+import { getAppVersion } from './common/utils/app-version';
 
 /**
  * Detect which environment file is being used
@@ -42,12 +43,9 @@ async function bootstrap() {
 
   app.enableCors({
     origin: (origin, callback) => {
-      if (!origin) {
-        if (nodeEnv === 'production') {
-          return callback(new Error('CORS: Origin requerido en producción'));
-        }
-        return callback(null, true);
-      }
+      // Sin Origin = llamada servidor a servidor (backends, healthcheck, curl).
+      // CORS solo protege navegadores; estas llamadas las protege el JWT.
+      if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       callback(new Error('CORS: Origen no permitido'));
     },
@@ -87,7 +85,7 @@ Todos los endpoints requieren un token JWT.
 - **Pruebas:** Usar \`"ambiente": "1"\` en las peticiones.
 - **Producción:** Usar \`"ambiente": "2"\` (solo cuando el SRI apruebe la cuenta).`,
     )
-    .setVersion('2.0.0')
+    .setVersion(getAppVersion())
     .addBearerAuth(
       {
         type: 'http',

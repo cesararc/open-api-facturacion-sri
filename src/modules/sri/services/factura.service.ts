@@ -18,7 +18,9 @@ import {
   TotalImpuesto,
   SriOperationResult,
 } from '../interfaces';
+import { ComprobanteRecord } from '../interfaces/repository.interface';
 import { TipoComprobante, Ambiente, TipoEmision } from '../constants';
+import { extractRucFromClaveAcceso } from '../utils/clave-acceso.utils';
 
 @Injectable()
 export class FacturaService {
@@ -36,10 +38,49 @@ export class FacturaService {
   ) {}
 
   /**
+   * Emisiones con referenciaExterna que esta instancia está procesando ahora.
+   * Si llega la misma venta dos veces a la vez (reintento del cliente mientras
+   * el SRI aún responde), la segunda espera el resultado de la primera en vez
+   * de emitir otra factura. Cubre una sola instancia: entre instancias, quien
+   * llama debe serializar por venta (el MCP lo hace con su candado en Firestore).
+   */
+  private readonly emisionesEnCurso = new Map<
+    string,
+    Promise<FacturaResponseDto>
+  >();
+
+  /**
+   * Emite una factura electrónica. Con `referenciaExterna` la operación es
+   * idempotente: ver resolverEmisionPrevia().
+   */
+  async emitirFactura(dto: CreateFacturaDto): Promise<FacturaResponseDto> {
+    if (!dto.referenciaExterna) {
+      return this.ejecutarEmision(dto);
+    }
+
+    const key = `${dto.emisor.ruc}:${dto.referenciaExterna}`;
+    const enCurso = this.emisionesEnCurso.get(key);
+    if (enCurso) {
+      this.logger.warn(
+        `Emisión simultánea para la referencia ${dto.referenciaExterna}: se espera la que ya está en curso`,
+      );
+      return enCurso;
+    }
+
+    const emision = this.ejecutarEmision(dto).finally(() => {
+      this.emisionesEnCurso.delete(key);
+    });
+    this.emisionesEnCurso.set(key, emision);
+    return emision;
+  }
+
+  /**
    * Emite una factura electrónica completa: valida, genera XML, firma, envía al SRI y persiste
    * Patrón de 3 fases — nunca bloquea el pool de DB durante la llamada SOAP al SRI
    */
-  async emitirFactura(dto: CreateFacturaDto): Promise<FacturaResponseDto> {
+  private async ejecutarEmision(
+    dto: CreateFacturaDto,
+  ): Promise<FacturaResponseDto> {
     this.logger.log('Iniciando emisión de factura electrónica');
 
     try {
@@ -81,6 +122,18 @@ export class FacturaService {
             dto.emisor.puntoEmision,
           )
         : null;
+
+      // ─── IDEMPOTENCIA: antes de gastar un secuencial ───
+      if (dto.referenciaExterna && emisor) {
+        const previa = await this.resolverEmisionPrevia(
+          emisor.id,
+          ambiente,
+          dto.referenciaExterna,
+        );
+        if (previa) {
+          return previa;
+        }
+      }
 
       // ─── FASE 1: Transacción corta (~5ms) — Solo reservar secuencial ───
       let secuencial: string;
@@ -128,7 +181,7 @@ export class FacturaService {
       // Verificar certificado
       if (
         !emisor ||
-        !emisor.certificado_nombre ||
+        (!emisor.certificado_p12 && !emisor.certificado_nombre) ||
         !emisor.certificado_password_encrypted
       ) {
         throw new BadRequestException(
@@ -232,6 +285,297 @@ export class FacturaService {
       this.logger.error(`Error al emitir factura: ${(error as Error).message}`);
       throw error;
     }
+  }
+
+  // ==========================================
+  // IDEMPOTENCIA POR REFERENCIA EXTERNA
+  // ==========================================
+
+  /**
+   * Decide qué hacer cuando el emisor ya tiene comprobantes con esta referencia:
+   *
+   * - Uno AUTORIZADO      → se devuelve ese. No se emite nada.
+   * - Uno sin resolver    → se resuelve contra el SRI con su misma clave de
+   *                         acceso (consulta y, si el SRI no lo tiene, reenvío
+   *                         del mismo XML firmado). Nunca se emite otro mientras
+   *                         no se sepa qué pasó con este.
+   * - Solo rechazados     → null: el llamador emite una factura nueva.
+   *
+   * Retorna la respuesta a devolver, o null si corresponde emitir.
+   */
+  private async resolverEmisionPrevia(
+    emisorId: string,
+    ambiente: string,
+    referenciaExterna: string,
+  ): Promise<FacturaResponseDto | null> {
+    const previos = await this.repository.findComprobantesByReferenciaExterna(
+      emisorId,
+      TipoComprobante.FACTURA,
+      ambiente,
+      referenciaExterna,
+    );
+    if (previos.length === 0) {
+      return null;
+    }
+
+    const autorizado = previos.find((c) => c.estado === 'AUTORIZADO');
+    if (autorizado) {
+      this.logger.log(
+        `Referencia ${referenciaExterna} ya tiene factura autorizada ...${autorizado.clave_acceso.slice(-8)}: se devuelve sin emitir otra`,
+      );
+      return this.comprobanteAutorizadoToResponse(autorizado);
+    }
+
+    for (const comprobante of previos) {
+      if (!FacturaService.ESTADOS_SIN_RESOLVER.includes(comprobante.estado)) {
+        continue;
+      }
+      const respuesta = await this.resolverComprobantePendiente(comprobante);
+      if (respuesta) {
+        return respuesta;
+      }
+      // El SRI lo rechazó: seguir revisando y, si no queda ninguno, emitir uno nuevo
+    }
+
+    return null;
+  }
+
+  /** Estados en los que todavía no se sabe si el SRI autorizó el comprobante */
+  private static readonly ESTADOS_SIN_RESOLVER = [
+    'PENDIENTE',
+    'EN PROCESO',
+    'EN_PROCESO',
+    'RECIBIDA',
+  ];
+
+  /**
+   * Identificadores con los que el SRI devuelve un comprobante que en realidad
+   * ya tiene: 43 = clave de acceso registrada, 70 = clave en procesamiento.
+   */
+  private static readonly SRI_CLAVE_YA_RECIBIDA = ['43', '70'];
+
+  /**
+   * Resuelve un comprobante que quedó sin respuesta definitiva del SRI.
+   * Retorna la respuesta a devolver (autorizado o todavía en proceso), o null
+   * si el SRI lo rechazó y por lo tanto se puede emitir uno nuevo.
+   */
+  private async resolverComprobantePendiente(
+    comprobante: ComprobanteRecord,
+  ): Promise<FacturaResponseDto | null> {
+    const claveAcceso = comprobante.clave_acceso;
+    this.logger.log(
+      `Resolviendo comprobante pendiente ...${claveAcceso.slice(-8)} contra el SRI`,
+    );
+
+    // 1. ¿El SRI ya lo conoce? Si la consulta falla, el error sube: sin saber
+    //    qué pasó con este comprobante no se emite otro.
+    let resultado = await this.consultarEstadoEnSri(claveAcceso);
+
+    // 2. El SRI no lo tiene: reenviar el mismo XML firmado. Misma clave de
+    //    acceso, así que no puede generar una segunda factura.
+    if (!resultado) {
+      const xmlFirmado = await this.leerXmlFirmado(comprobante.id!);
+      if (!xmlFirmado) {
+        this.logger.error(
+          `Comprobante pendiente ...${claveAcceso.slice(-8)} sin XML firmado: no se puede reenviar. Requiere revisión manual.`,
+        );
+        return this.respuestaEnProceso(
+          claveAcceso,
+          'El comprobante quedó pendiente y no se encontró su XML firmado para reenviarlo. Requiere revisión manual.',
+        );
+      }
+      resultado = await this.sriSoapClient.enviarYAutorizar(
+        xmlFirmado,
+        claveAcceso,
+      );
+    }
+
+    if (resultado.success && resultado.estado === 'AUTORIZADO') {
+      await this.marcarComprobanteAutorizado(comprobante, resultado);
+      return this.mapResultToResponse(resultado);
+    }
+
+    const sriYaLoTiene =
+      resultado.estado === 'DEVUELTA' &&
+      resultado.mensajes.some((m) =>
+        FacturaService.SRI_CLAVE_YA_RECIBIDA.includes(String(m.identificador)),
+      );
+
+    if (resultado.estado === 'EN PROCESO' || sriYaLoTiene) {
+      await this.repository.updateComprobante(comprobante.id!, {
+        estado: 'EN PROCESO',
+        estado_sri: 'EN PROCESO',
+      });
+      return this.respuestaEnProceso(
+        claveAcceso,
+        'El SRI todavía está procesando el comprobante. Vuelva a intentar en unos minutos.',
+      );
+    }
+
+    // Rechazo definitivo (DEVUELTA / NO AUTORIZADO)
+    await this.repository.updateComprobante(comprobante.id!, {
+      estado: resultado.estado,
+      estado_sri: resultado.estado,
+    });
+    this.eventEmitter.emit('comprobante.rechazado', {
+      emisorId: comprobante.emisor_id,
+      claveAcceso,
+      tipoComprobante: TipoComprobante.FACTURA,
+      estado: resultado.estado,
+      mensajes: resultado.mensajes,
+    });
+    this.logger.warn(
+      `Comprobante pendiente ...${claveAcceso.slice(-8)} rechazado por el SRI (${resultado.estado}): se emitirá uno nuevo`,
+    );
+    return null;
+  }
+
+  /**
+   * Consulta la autorización en el SRI. Retorna null si el SRI no tiene
+   * registro de la clave (nunca la recibió).
+   */
+  private async consultarEstadoEnSri(
+    claveAcceso: string,
+  ): Promise<SriOperationResult | null> {
+    const respuesta = await this.sriSoapClient.autorizarComprobante(claveAcceso);
+    const autorizaciones = respuesta.autorizaciones?.autorizacion;
+    const auth = Array.isArray(autorizaciones)
+      ? autorizaciones[0]
+      : autorizaciones;
+
+    if (!auth) {
+      return null;
+    }
+
+    const mensajes = auth.mensajes?.mensaje
+      ? Array.isArray(auth.mensajes.mensaje)
+        ? auth.mensajes.mensaje
+        : [auth.mensajes.mensaje]
+      : [];
+
+    if (auth.estado === 'AUTORIZADO') {
+      return {
+        success: true,
+        claveAcceso,
+        estado: 'AUTORIZADO',
+        fechaAutorizacion: auth.fechaAutorizacion,
+        numeroAutorizacion: auth.numeroAutorizacion,
+        xmlAutorizado: auth.comprobante,
+        mensajes,
+      };
+    }
+
+    return {
+      success: false,
+      claveAcceso,
+      estado: auth.estado === 'NO AUTORIZADO' ? 'NO AUTORIZADO' : 'EN PROCESO',
+      mensajes,
+    };
+  }
+
+  private async leerXmlFirmado(comprobanteId: string): Promise<string | null> {
+    const xmlRecord =
+      await this.repository.findXmlByComprobanteId(comprobanteId);
+    if (!xmlRecord?.xml_firmado_path) {
+      return null;
+    }
+    return this.xmlStorage.readXml(
+      xmlRecord.xml_firmado_path.replace(/\\/g, '/'),
+    );
+  }
+
+  private async marcarComprobanteAutorizado(
+    comprobante: ComprobanteRecord,
+    resultado: SriOperationResult,
+  ): Promise<void> {
+    const claveAcceso = comprobante.clave_acceso;
+
+    await this.repository.updateComprobante(comprobante.id!, {
+      estado: 'AUTORIZADO',
+      estado_sri: resultado.estado,
+      fecha_autorizacion: resultado.fechaAutorizacion,
+      numero_autorizacion: resultado.numeroAutorizacion || claveAcceso,
+    });
+
+    if (resultado.xmlAutorizado) {
+      const autorizadoPath = this.xmlStorage.saveXml(
+        extractRucFromClaveAcceso(claveAcceso),
+        claveAcceso,
+        new Date(comprobante.fecha_emision),
+        'autorizado',
+        resultado.xmlAutorizado,
+      );
+      await this.repository.saveXml({
+        comprobante_id: comprobante.id!,
+        xml_autorizado_path: autorizadoPath,
+      });
+    }
+
+    this.eventEmitter.emit('comprobante.autorizado', {
+      emisorId: comprobante.emisor_id,
+      claveAcceso,
+      tipoComprobante: TipoComprobante.FACTURA,
+      secuencial: comprobante.secuencial,
+      fechaAutorizacion: resultado.fechaAutorizacion,
+      numeroAutorizacion: resultado.numeroAutorizacion,
+    });
+    this.logger.log(
+      `Comprobante pendiente ...${claveAcceso.slice(-8)} quedó AUTORIZADO`,
+    );
+  }
+
+  private async comprobanteAutorizadoToResponse(
+    comprobante: ComprobanteRecord,
+  ): Promise<FacturaResponseDto> {
+    let xmlAutorizado: string | undefined;
+    try {
+      const xmlRecord = await this.repository.findXmlByComprobanteId(
+        comprobante.id!,
+      );
+      if (xmlRecord?.xml_autorizado_path) {
+        xmlAutorizado =
+          this.xmlStorage.readXml(
+            xmlRecord.xml_autorizado_path.replace(/\\/g, '/'),
+          ) ?? undefined;
+      }
+    } catch (error) {
+      // El XML es un adjunto: su ausencia no cambia que la factura ya existe
+      this.logger.warn(
+        `No se pudo leer el XML autorizado de ...${comprobante.clave_acceso.slice(-8)}: ${(error as Error).message}`,
+      );
+    }
+
+    // pg entrega timestamptz como Date aunque el tipo del registro diga string
+    const fecha = comprobante.fecha_autorizacion as string | Date | undefined;
+
+    return {
+      success: true,
+      claveAcceso: comprobante.clave_acceso,
+      estado: 'AUTORIZADO',
+      fechaAutorizacion: fecha instanceof Date ? fecha.toISOString() : fecha,
+      numeroAutorizacion:
+        comprobante.numero_autorizacion || comprobante.clave_acceso,
+      xmlAutorizado,
+      mensajes: [],
+    };
+  }
+
+  private respuestaEnProceso(
+    claveAcceso: string,
+    mensaje: string,
+  ): FacturaResponseDto {
+    return {
+      success: false,
+      claveAcceso,
+      estado: 'EN PROCESO',
+      mensajes: [
+        {
+          identificador: 'EN_PROCESO',
+          mensaje,
+          tipo: 'ADVERTENCIA',
+        },
+      ],
+    };
   }
 
   /**
@@ -379,6 +723,7 @@ export class FacturaService {
           receptor_email: dto.comprador.email,
           receptor_telefono: dto.comprador.telefono,
           guia_remision: dto.guiaRemision,
+          id_referencia_externa: dto.referenciaExterna,
         },
         client,
       );

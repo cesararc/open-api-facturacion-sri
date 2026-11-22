@@ -274,6 +274,7 @@ export class RideService {
         '6': 'No Objeto de Impuesto',
         '7': 'Exento de IVA',
         '8': 'IVA Diferenciado',
+        '10': 'IVA 13%',
       };
       return tarifas[codigoPorcentaje] || baseDesc;
     }

@@ -96,6 +96,12 @@ export class JwtPayload {
   rol: UserRole;
   tenantId: string | null;
   type?: 'access' | 'refresh';
+  /**
+   * Versión de sesión del usuario al emitir el token. Si ya no coincide con
+   * usuarios.token_version, el token fue revocado (logout o cambio de clave).
+   * Los tokens emitidos antes de existir este campo cuentan como versión 0.
+   */
+  tokenVersion?: number;
   iat?: number;
   exp?: number;
 }

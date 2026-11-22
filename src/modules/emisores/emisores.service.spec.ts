@@ -309,6 +309,30 @@ describe('EmisoresService', () => {
       ).rejects.toThrow(ForbiddenException);
     });
 
+    it('debe lanzar ForbiddenException si el emisor no tiene tenant y el usuario no es SUPERADMIN', async () => {
+      // Antes pasaba: un emisor sin tenant quedaba abierto a cualquier tenant
+      db.query.mockResolvedValueOnce({
+        rows: [{ ...mockEmisorRow, tenant_id: null }],
+      } as any);
+
+      await expect(
+        service.validateEmisorAccess('emisor-uuid-1', tenantUser),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('SUPERADMIN sí accede a un emisor sin tenant', async () => {
+      db.query.mockResolvedValueOnce({
+        rows: [{ ...mockEmisorRow, tenant_id: null }],
+      } as any);
+
+      const result = await service.validateEmisorAccess(
+        'emisor-uuid-1',
+        superadminUser,
+      );
+
+      expect(result.id).toBe('emisor-uuid-1');
+    });
+
     it('debe lanzar NotFoundException si el emisor no existe', async () => {
       db.query.mockResolvedValueOnce({ rows: [] } as any);
 
@@ -333,6 +357,31 @@ describe('EmisoresService', () => {
       db.query.mockResolvedValueOnce({ rows: [mockEmisorRow] } as any);
 
       const result = await service.validateRucAccess('1712345678001', tenantUser);
+
+      expect(result.ruc).toBe('1712345678001');
+    });
+
+    it('debe lanzar ForbiddenException si el emisor del RUC no tiene tenant y el usuario no es SUPERADMIN', async () => {
+      // Esta validación protege la emisión: sin ella, cualquier tenant podía
+      // facturar a nombre de un emisor sin tenant asignado
+      db.query.mockResolvedValueOnce({
+        rows: [{ ...mockEmisorRow, tenant_id: null }],
+      } as any);
+
+      await expect(
+        service.validateRucAccess('1712345678001', tenantUser),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('SUPERADMIN sí accede por RUC a un emisor sin tenant', async () => {
+      db.query.mockResolvedValueOnce({
+        rows: [{ ...mockEmisorRow, tenant_id: null }],
+      } as any);
+
+      const result = await service.validateRucAccess(
+        '1712345678001',
+        superadminUser,
+      );
 
       expect(result.ruc).toBe('1712345678001');
     });
